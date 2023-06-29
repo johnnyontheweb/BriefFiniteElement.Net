@@ -46,6 +46,11 @@ namespace BriefFiniteElementNet.Mathh
             return new SingleVariablePolynomial(coefs);
         }
 
+        /// <summary>
+        /// coefs= a4 a3 a2 a1
+        /// poly = a4 * x^4 + a3 * x^3 + a2 * x^2 + a1 * x^1 + a0 * x^0
+        /// </summary>
+        /// <param name="coefs"></param>
         public SingleVariablePolynomial(params double[] coefs)
         {
             Coefficients = (double[])coefs.Clone();
@@ -158,6 +163,36 @@ namespace BriefFiniteElementNet.Mathh
             }
 
             return true;
+        }
+
+        //get max difference between coeficients of two polynomials
+        public static double GetMaxDiff(SingleVariablePolynomial @this , SingleVariablePolynomial that)
+        {
+            var thisDic = @this.GetCoefficientsAsDictionary();
+            var thatDic = that.GetCoefficientsAsDictionary();
+
+            var allKeys = thisDic.Keys.Union(thatDic.Keys).Distinct().ToList();
+
+            var max = 0.0;
+
+            foreach (var key in allKeys)
+            {
+                var thisValue = 0.0;
+                var thatValue = 0.0;
+
+                if (thisDic.ContainsKey(key))
+                    thisValue = thisDic[key];
+
+                if (thatDic.ContainsKey(key))
+                    thatValue = thatDic[key];
+
+                var err = Math.Abs(thisValue - thatValue);
+                
+                if (err > max)
+                    max = err;
+            }
+
+            return max;
         }
 
         /// <summary>

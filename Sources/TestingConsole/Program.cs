@@ -14,8 +14,10 @@ namespace TestingConsole
             //BriefFiniteElementNet.Validation.GithubIssues.Issue152.Run();
             //EulerBernouly2nodeChecker.Check2NodeShapeFunctionYDir();
             //EulerBernouly2nodeChecker.Check2NodeShapeFunctionZDir();
-            EulerBernouly2nodeChecker.CheckTrussShapeFunction();
+            //EulerBernouly2nodeChecker.CheckTrussShapeFunction();
 
+            //TimoshenkoBeamChecker.Test2();
+            EulerBernouly2nodeChecker.TestConsoleBeam();
             Console.Write("Done");
         }
     }
