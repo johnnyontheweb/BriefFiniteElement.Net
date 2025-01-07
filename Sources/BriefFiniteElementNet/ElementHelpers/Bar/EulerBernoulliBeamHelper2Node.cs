@@ -8,12 +8,13 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using ElementLocalDof = BriefFiniteElementNet.ElementPermuteHelper.ElementLocalDof;
 
 namespace BriefFiniteElementNet.ElementHelpers.BarHelpers
 {
-    public class EulerBernoulliBeamHelper2Node : BaseBar2NodeHelper
+    public partial class EulerBernoulliBeamHelper2Node : BaseBar2NodeHelper
     {
 
         public static Matrix GetNMatrixAt(double xi, double l, DofConstraint D0, DofConstraint R0, DofConstraint D1, DofConstraint R1, BeamDirection dir)
@@ -106,17 +107,361 @@ namespace BriefFiniteElementNet.ElementHelpers.BarHelpers
         }
 
 
-
-
-        public override Displacement GetLoadDisplacementAt(Element targetElement, ElementalLoad load, double[] isoLocation)
+        [TodoDelete]
+        /// <summary>
+        /// Get the internal defomation of element due to applied <see cref="load"/>
+        /// </summary>
+        /// <param name="targetElement"></param>
+        /// <param name="load"></param>
+        /// <param name="isoLocation"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        /// <exception cref="NotImplementedException"></exception>
+        private /*override*/ Displacement GetLoadDisplacementAt_old(Element targetElement, ElementalLoad load, double[] isoLocation)
         {
+            var bar = targetElement as BarElement;
+
+            var n = targetElement.Nodes.Length;
+
+            if (n != 2)
+                throw new Exception("more than two nodes not supported");
+
+
+            var eIorder = bar.Section.GetMaxFunctionOrder()[0] + bar.Material.GetMaxFunctionOrder()[0];
+
+            if (eIorder == 0 && bar.StartReleaseCondition == Constraints.Fixed && bar.EndReleaseCondition == Constraints.Fixed)//constant/uniform section along the length of beam
+            {
+                //EI is constant through the length of beam
+                //end releases are fixed
+
+                if (load is UniformLoad ul)
+                    return GetLoadDisplacementAt_UniformLoad_uniformSection(bar, ul, isoLocation[0]);
+
+                if (load is ConcentratedLoad cl)
+                    return GetLoadDisplacementAt_ConcentratedLoad_uniformSection(bar, cl, isoLocation[0]);
+
+                if (load is PartialNonUniformLoad pnl)
+                    return GetLoadDisplacementAt_PartialNonUniformLoad_uniformSection(bar, pnl, isoLocation[0]);
+            }
+
             throw new NotImplementedException();
         }
 
+        #region GetLoadDisplacement
+
+        private Displacement GetLoadDisplacementAt_UniformLoad_uniformSection(BarElement bar, UniformLoad load, double xi)
+        {
+            //https://byjusexamprep.com/gate-ce/fixed-beams
+            double w0;
+            double L;
+            double f0, m0;
+
+            if (bar.NodeCount != 2)
+                throw new Exception();
+
+            {//step 0
+                L = (bar.Nodes[1].Location - bar.Nodes[0].Location).Length;
+            }
+
+            #region step 1
+            {
+                var p0 = GetLocalEquivalentNodalLoads(bar, load)[0];
+
+                p0 = -p0;
+
+                var localDir = load.Direction;
+
+                var tr = bar.GetTransformationManager();
+
+                if(load.CoordinationSystem == CoordinationSystem.Global)
+                    localDir = tr.TransformGlobalToLocal(localDir);
+
+                localDir = localDir.GetUnit();
+
+                switch (this.Direction)
+                {
+                    case BeamDirection.Y:
+                        f0 = p0.Fz;
+                        m0 = p0.My;//TODO: add possible negative sign
+                        w0 = localDir.Z * load.Magnitude;
+                        break;
+
+                    case BeamDirection.Z:
+                        f0 = p0.Fy;
+                        m0 = -p0.Mz;//TODO: add possible negative sign
+                        w0 = localDir.Y * load.Magnitude;
+                        break;
+
+                    default:
+                        throw new NotImplementedException();
+                }
+            }
+            #endregion
+
+            {
+                var eiOrder = bar.Section.GetMaxFunctionOrder()[0] + bar.Material.GetMaxFunctionOrder()[0];
+
+                if (eiOrder != 0) throw new BriefFiniteElementNetException("Nonuniform EI");
+            }
+
+            
+
+
+            {
+                var sec = bar.Section.GetCrossSectionPropertiesAt(xi,bar);
+                var mat = bar.Material.GetMaterialPropertiesAt(new IsoPoint(xi), bar);
+
+                var e = mat.Ex;
+                var I = this.Direction == BeamDirection.Y ? sec.Iy : sec.Iz;
+                var x = bar.IsoCoordsToLocalCoords(xi)[0];
+
+                //https://gs-post-images.grdp.co/2022/8/fixed-beam-deflection-img1661861640198-75-rs.PNG?noResize=1
+                var d = w0 * x * x / (24.0 * e * I) * (L - x) * (L - x);
+
+                var buf = new Displacement();
+
+                if (this.Direction == BeamDirection.Y)
+                    buf.DZ = d;
+                else
+                    buf.DY = d;
+
+                return buf;
+            }
+        }
+
+        //copied to ILoadHandler
+        private Displacement GetLoadDisplacementAt_ConcentratedLoad_uniformSection(BarElement bar, ConcentratedLoad load, double xi)
+        {
+            //https://www.engineersedge.com/beam_bending/beam_bending19.htm
+            double L;
+            double ft, mt;//force and moment concentrated
+            double f0, m0;//inverse of eq nodal loads
+            double xt;//applied location
+
+            if (bar.NodeCount != 2)
+                throw new Exception();
+
+            {//step 0
+                L = (bar.Nodes[1].Location - bar.Nodes[0].Location).Length;
+
+                xt = bar.IsoCoordsToLocalCoords(xi)[0];
+            }
+
+            #region step 1
+            {
+                var p0 = GetLocalEquivalentNodalLoads(bar, load)[0];
+
+                p0 = -p0;
+
+                var localForce = load.Force;
+
+                var tr = bar.GetTransformationManager();
+
+                if (load.CoordinationSystem == CoordinationSystem.Global)
+                    localForce = tr.TransformGlobalToLocal(localForce);
+
+                switch (this.Direction)
+                {
+                    case BeamDirection.Y:
+                        ft = localForce.Fz;
+                        mt = localForce.My;//TODO: add possible negative sign
+                        f0 = p0.Fz;
+                        m0 = p0.My;//TODO: add possible negative sign
+                        break;
+
+                    case BeamDirection.Z:
+                        ft = localForce.Fy;
+                        mt = -localForce.Mz;//TODO: add possible negative sign
+
+                        f0 = p0.Fy;
+                        m0 = -p0.Mz;//TODO: add possible negative sign
+
+                        break;
+
+                    default:
+                        throw new NotImplementedException();
+                }
+
+
+            }
+            #endregion
+
+            {
+                var eiOrder = bar.Section.GetMaxFunctionOrder()[0] + bar.Material.GetMaxFunctionOrder()[0];
+
+                if (eiOrder != 0) throw new BriefFiniteElementNetException("Nonuniform EI");
+            }
+
+            {
+                var sec = bar.Section.GetCrossSectionPropertiesAt(xi, bar);
+                var mat = bar.Material.GetMaterialPropertiesAt(new IsoPoint(xi), bar);
+
+                var e = mat.Ex;
+                var I = this.Direction == BeamDirection.Y ? sec.Iy : sec.Iz;
+                var x = bar.IsoCoordsToLocalCoords(xi)[0];
+
+                var d = 0.0;//TODO
+
+                {
+                    var x2 = x * x;
+                    var x3 = x2 * x;
+                    var xt2 = xt * xt;
+                    var xt3 = xt2 * xt;
+
+                    var v0 = f0;
+                    var vt = ft;
+
+                    if (x <= xt)
+                        d = m0 * x2 / 2 + v0 * x3 / 6;
+                    else
+                        d = m0 * xt2 / 2 + v0 * xt3 / 6 + x3 * (v0 / 6 + vt / 6) + x2 * (m0 / 2 + mt / 2 - vt * xt / 2) + x * (-mt * xt + vt * xt2 / 2) - xt3 * (v0 / 6 + vt / 6) - xt2 * (m0 / 2 + mt / 2 - vt * xt / 2) - xt * (-mt * xt + vt * xt2 / 2);
+
+                    d = d / (e * I);
+                }
+
+                var buf = new Displacement();
+
+                if (this.Direction == BeamDirection.Y)
+                    buf.DZ = d;
+                else
+                    buf.DY = d;
+
+                return buf;
+            }
+        }
+
+        private Displacement GetLoadDisplacementAt_PartialNonUniformLoad_uniformSection(BarElement bar, PartialNonUniformLoad load, double xi)
+        {
+            throw new NotImplementedException();
+            /*
+            double ksi0, ksi1;//start and end of load region
+
+            double f0, m0, w0;
+            double L;
+
+            if (bar.NodeCount != 2)
+                throw new Exception();
+
+            {//step 0
+                L = (bar.Nodes[1].Location - bar.Nodes[0].Location).Length;
+            }
+
+            #region step 1
+            {
+                var p0 = GetLocalEquivalentNodalLoads(bar, load)[0];
+
+                p0 = -p0;
+
+                var localDir = load.Direction;
+
+                var tr = bar.GetTransformationManager();
+
+                if (load.CoordinationSystem == CoordinationSystem.Global)
+                    localDir = tr.TransformGlobalToLocal(localDir);
+
+                localDir = localDir.GetUnit();
+
+                switch (this.Direction)
+                {
+                    case BeamDirection.Y:
+                        f0 = p0.Fz;
+                        m0 = p0.My;//TODO: add possible negative sign
+                        w0 = localDir.Z * load.Magnitude;
+                        break;
+
+                    case BeamDirection.Z:
+                        f0 = p0.Fy;
+                        m0 = -p0.Mz;//TODO: add possible negative sign
+                        w0 = localDir.Y * load.Magnitude;
+                        break;
+
+                    default:
+                        throw new NotImplementedException();
+                }
+            }
+            #endregion
+
+            #region step2
+            double[] xs;
+
+            {
+                var n_ = bar.Section.GetMaxFunctionOrder()[0];
+                var m_ = bar.Material.GetMaxFunctionOrder()[0];
+                var sn_ = 3 + 2 * n_ + 2 * m_;
+
+                xs = CalcUtil.DivideSpan(0, L, sn_ - 1);
+            }
+            #endregion
+
+            double[] mOverEis;
+
+            #region step3-4
+            {
+                var moverEi = new Func<double, double>(x =>
+                {
+                    var xi_ = (2 * x - L) / L;
+
+                    var mat_ = bar.Material.GetMaterialPropertiesAt(new IsoPoint(xi_, 0, 0), bar);
+                    var sec_ = bar.Section.GetCrossSectionPropertiesAt(xi_, bar);
+
+                    var m_x = w0 * x * x / 2 + f0 * x + m0;
+
+                    var e_x = mat_.Ex;
+                    var i_x = this.Direction == BeamDirection.Y ? sec_.Iy : sec_.Iz;
+
+                    return m_x / (e_x * i_x);
+                });
+
+                mOverEis = xs.Select(x_ => moverEi(x_)).ToArray();
+            }
+            #endregion
+
+
+            Polynomial1D G;
+
+            #region step5
+            {
+                //MathNet.Numerics.LinearAlgebra.
+                G = Polynomial1D.FromPoints(xs, mOverEis);
+            }
+            #endregion
+
+            double delta0, theta0;
+
+            #region step6
+            {
+                delta0 = theta0 = 0;
+            }
+            #endregion
+
+            Displacement buf;
+
+            {
+                buf = new Displacement();
+
+                var x = (xi + 1) * L / 2;
+                //var intg=G.EvaluateNthIntegralAt
+                var delta = G.EvaluateNthIntegral(2, x)[0];
+
+                if (Direction == BeamDirection.Y)
+                    buf.DZ = delta;
+
+                if (Direction == BeamDirection.Z)
+                    buf.DY = delta;
+            }
+
+            return buf;
+            */
+        }
+
+        #endregion
+
         /// <inheritdoc/>
-        public override IEnumerable<Tuple<DoF, double>> GetLoadInternalForceAt(Element targetElement, ElementalLoad load,
+        [TodoDelete]
+        public IEnumerable<Tuple<DoF, double>> GetLoadInternalForceAt_old(Element targetElement, ElementalLoad load,
             double[] isoLocation)
         {
+
             var n = targetElement.Nodes.Length;
 
             var buff = new List<Tuple<DoF, double>>();
@@ -411,6 +756,189 @@ namespace BriefFiniteElementNet.ElementHelpers.BarHelpers
             throw new NotImplementedException();
         }
 
+        #region GetLoadForce
+        [TodoDelete]
+        private Force GetLoadInternalForceAt_New(Element targetElement, ElementalLoad load, double[] isoLocation)
+        {
+            var bar = targetElement as BarElement;
+
+            if (targetElement.Nodes.Length != 2)
+                throw new Exception("more than two nodes not supported");
+
+            if (load is UniformLoad ul)
+                return GetLoadForceAt_UniformLoad(bar, ul, isoLocation[0]);
+
+            if (load is PartialLinearLoad pnl)
+                return GetLoadForceAt_PartialLinearLoad(bar, pnl, isoLocation[0]);
+
+
+            throw new NotImplementedException();
+        }
+        [TodoDelete]
+        private Force GetLoadForceAt_UniformLoad(BarElement bar, UniformLoad load, double xi)
+        {
+            double f0, m0, w0;
+            double L;
+
+            if (bar.NodeCount != 2)
+                throw new Exception();
+
+            {//the L
+                L = bar.GetLength();
+            }
+
+            {//find f0,m0,w0, inverse of equivalent nodal loads applied to start node
+
+                var p0 = GetLocalEquivalentNodalLoads(bar, load)[0];
+
+                p0 = -p0;
+
+                var localDir = load.Direction;
+
+                var tr = bar.GetTransformationManager();
+
+                if (load.CoordinationSystem == CoordinationSystem.Global)
+                    localDir = tr.TransformGlobalToLocal(localDir);
+
+                localDir = localDir.GetUnit();
+
+                switch (this.Direction)
+                {
+                    case BeamDirection.Y:
+                        f0 = p0.Fz;
+                        m0 = p0.My;//TODO: add possible negative sign
+                        w0 = localDir.Z * load.Magnitude;
+                        break;
+
+                    case BeamDirection.Z:
+                        f0 = p0.Fy;
+                        m0 = -p0.Mz;//TODO: add possible negative sign
+                        w0 = localDir.Y * load.Magnitude;
+                        break;
+
+                    default:
+                        throw new NotImplementedException();
+                }
+            }
+
+            double m_x, v_x;
+
+            {//find M and V
+                var x = bar.IsoCoordsToLocalCoords(xi)[0];
+
+                m_x = w0 * x * x / 2 + f0 * x + m0;
+                v_x = f0;
+            }
+
+            Force buf;
+
+            {//substitude M and V to buf
+                buf = new Force();
+
+                if (Direction == BeamDirection.Y)
+                {
+                    buf.My = m_x;
+                    buf.Fz = v_x;
+                }
+
+                if (Direction == BeamDirection.Z)
+                {
+                    buf.Mz = m_x;
+                    buf.Fy = v_x;
+                }
+            }
+
+            return buf;
+        }
+        [TodoDelete]
+        private Force GetLoadForceAt_PartialLinearLoad(BarElement bar, PartialLinearLoad load, double xi)
+        {
+            double f0, m0, w0, w1, x0, x1;
+            double L;
+
+            if (bar.NodeCount != 2)
+                throw new Exception();
+
+            {//the L, x0, x1
+                L = bar.GetLength();
+
+                x0 = bar.IsoCoordsToLocalCoords(load.StartLocation.Xi)[0];
+                x1 = bar.IsoCoordsToLocalCoords(load.EndLocation.Xi)[0];
+            }
+
+            {//find f0, m0, w0, w1 inverse of equivalent nodal loads applied to start node
+                var p0 = GetLocalEquivalentNodalLoads(bar, load)[0];
+
+                p0 = -p0;
+
+                var localDir = load.Direction;
+
+                var tr = bar.GetTransformationManager();
+
+                if (load.CoordinationSystem == CoordinationSystem.Global)
+                    localDir = tr.TransformGlobalToLocal(localDir);
+
+                localDir = localDir.GetUnit();
+               
+                switch (this.Direction)
+                {
+                    case BeamDirection.Y:
+                        f0 = p0.Fz;
+                        m0 = p0.My;//TODO: add possible negative sign
+                        w0 = localDir.Z * load.StartMagnitude;
+                        w1 = localDir.Z * load.EndMagnitude;
+                        break;
+
+                    case BeamDirection.Z:
+                        f0 = p0.Fy;
+                        m0 = -p0.Mz;//TODO: add possible negative sign
+                        w0 = localDir.Y * load.StartMagnitude;
+                        w1 = localDir.Y * load.EndMagnitude;
+                        break;
+
+                    default:
+                        throw new NotImplementedException();
+                }
+            }
+
+            double m_x, v_x;
+
+            {//find M and V
+                var x = bar.IsoCoordsToLocalCoords(xi)[0];
+
+                var poly = Polynomial1D.FromPoints(x0, w0, x1, w1);
+
+                var intg = new StepFunctionIntegralCalculator();
+
+                intg.Polynomial = poly;
+
+                v_x = intg.CalculateIntegralAt(x0, x, 1) - intg.CalculateIntegralAt(x1, x, 1);
+                m_x = intg.CalculateIntegralAt(x0, x, 2) - intg.CalculateIntegralAt(x1, x, 2);
+            }
+
+            Force buf;
+
+            {//substitude M and V to buf
+                buf = new Force();
+
+                if (Direction == BeamDirection.Y)
+                {
+                    buf.My = m_x;
+                    buf.Fz = v_x;
+                }
+
+                if (Direction == BeamDirection.Z)
+                {
+                    buf.Mz = m_x;
+                    buf.Fy = v_x;
+                }
+            }
+
+            return buf;
+        }
+
+        #endregion
+
         /// <inheritdoc/>
         public override Displacement GetLocalDisplacementAt(Element targetElement, Displacement[] localDisplacements, params double[] isoCoords)
         {
@@ -561,15 +1089,260 @@ namespace BriefFiniteElementNet.ElementHelpers.BarHelpers
         }
 
 
-        public override Force[] GetLocalEquivalentNodalLoads(Element targetElement, ElementalLoad load)
+        #region EQ nodal load
+
+        [TodoDelete]
+        /// <summary>
+        /// load is uniform, but material or section is no uniform
+        /// </summary>
+        /// <param name="bar"></param>
+        /// <param name="load"></param>
+        /// <returns></returns>
+        /// <exception cref="NotImplementedException"></exception>
+        /// <exception cref="Exception"></exception>
+        private Force[] GetLocalEquivalentNodalLoads_uniformLoad_UniformMatSection(BarElement bar, UniformLoad load)
+        {
+            //where load is uniform and section or material is also uniform
+
+            int c;
+            double L;
+            double w0;
+
+            {//finding L
+                L = bar.GetLength();
+            }
+
+            {//finding w0
+                var localDir = load.Direction;
+
+                if (load.CoordinationSystem == CoordinationSystem.Global)
+                    localDir = bar.GetTransformationManager().TransformGlobalToLocal(localDir);
+
+                localDir = localDir.GetUnit();
+
+                switch (this.Direction)
+                {
+                    case BeamDirection.Y:
+                        w0 = localDir.Z * load.Magnitude;
+                        break;
+
+                    case BeamDirection.Z:
+                        w0 = localDir.Y * load.Magnitude;
+                        break;
+
+                    default:
+                        throw new NotImplementedException();
+                }
+            }
+
+            var m0 = w0 * L * L / 12;
+            var m1 = -w0 * L * L / 12;
+
+            var f0 = -w0 * L / 2;
+            var f1 = -w0 * L / 2;
+
+            //m0,m1, f0,f1 are support reactions
+            //eq nodal load is invert of support reaction
+
+            var re0 = new Force();
+            var re1 = new Force();
+
+            if (this.Direction == BeamDirection.Y)
+            {
+                re0.Fz = f0;
+                re1.Fz = f1;
+
+                re0.My = m0;//possible negative
+                re1.My = m1;//possible negative
+            }
+            else
+            {
+                re0.Fy = f0;
+                re1.Fy = f1;
+
+                re0.Mz = -m0;//possible negative
+                re1.Mz = -m1;//possible negative
+            }
+
+            return new Force[] { -re0, -re1 };
+        }
+
+
+        [TodoDelete]
+        /// <summary>
+        /// load is uniform, but material or section is no uniform
+        /// </summary>
+        /// <param name="bar"></param>
+        /// <param name="load"></param>
+        /// <returns></returns>
+        /// <exception cref="NotImplementedException"></exception>
+        /// <exception cref="Exception"></exception>
+        private Force[] GetLocalEquivalentNodalLoads_uniformLoad_nonUniformMatSection(BarElement bar, UniformLoad load)
+        {
+            //where load is uniform and section or material is non uniform
+
+            Polynomial1D oneOverEi, xOverEi, x2OverEi;
+
+            int c;
+            double L;
+            double w0;
+
+            {
+                var n = bar.Material.GetMaxFunctionOrder()[0];
+                var m = bar.Section.GetMaxFunctionOrder()[0];
+                var p = 2;
+                c = 2 * n + 2 * m + p;
+                //c += 3;
+                L = bar.GetLength();
+            }
+
+            {
+                var localDir = load.Direction;
+
+                var tr = bar.GetTransformationManager();
+
+                if (load.CoordinationSystem == CoordinationSystem.Global)
+                    localDir = tr.TransformGlobalToLocal(localDir);
+
+                localDir = localDir.GetUnit();
+
+                switch (this.Direction)
+                {
+                    case BeamDirection.Y:
+                        w0 = localDir.Z * load.Magnitude;
+                        break;
+
+                    case BeamDirection.Z:
+                        w0 = localDir.Y * load.Magnitude;
+                        break;
+
+                    default:
+                        throw new NotImplementedException();
+                }
+            }
+
+            double[] xs;
+
+            {
+                xs = CalcUtil.DivideSpan(0, L, c);
+
+                var y1s = new double[xs.Length];
+                var y2s = new double[xs.Length];
+                var y3s = new double[xs.Length];
+
+                for (var i = 0; i < xs.Length; i++)
+                {
+                    var x = xs[i];
+                    var xi = bar.LocalCoordsToIsoCoords(x)[0];
+
+                    var mech = bar.Material.GetMaterialPropertiesAt(new IsoPoint(xi), bar);
+                    var geo = bar.Section.GetCrossSectionPropertiesAt(xi, bar);
+
+                    var I = this.Direction == BeamDirection.Y ? geo.Iy : geo.Iz;
+
+                    var ei = mech.Ex * I;
+
+                    y1s[i] = 1 / ei;
+                    y2s[i] = x / ei;
+                    y3s[i] = x * x / ei;
+                }
+
+                oneOverEi = Polynomial1D.FromPoints(xs, y1s);
+                xOverEi = Polynomial1D.FromPoints(xs, y2s);
+                x2OverEi = Polynomial1D.FromPoints(xs, y3s);
+
+            }
+
+            double y11, y22, y33;
+            double y1, y2, y3;
+
+            {
+                y1 = oneOverEi.EvaluateNthIntegral(1, 0)[0] - oneOverEi.EvaluateNthIntegral(1, L)[0];
+                y2 = xOverEi.EvaluateNthIntegral(1, 0)[0] - xOverEi.EvaluateNthIntegral(1, L)[0];
+                y3 = x2OverEi.EvaluateNthIntegral(1, 0)[0] - x2OverEi.EvaluateNthIntegral(1, L)[0];
+
+                y11 = oneOverEi.EvaluateNthIntegral(2, 0)[0] - oneOverEi.EvaluateNthIntegral(2, L)[0];
+                y22 = xOverEi.EvaluateNthIntegral(2, 0)[0] - xOverEi.EvaluateNthIntegral(2, L)[0];
+                y33 = x2OverEi.EvaluateNthIntegral(2, 0)[0] - x2OverEi.EvaluateNthIntegral(2, L)[0];
+            }
+
+            {
+                if (bar.StartReleaseCondition != Constraints.Fixed || bar.EndReleaseCondition != Constraints.Fixed)
+                    throw new Exception("Not supported end releases");
+            }
+
+            double f0, m0;
+
+            {
+                CalcUtil.Solve2x2(y1, y2, -w0 /2* y3,
+                    y11, y22, -w0/2 * y33, out m0, out f0);
+            }
+
+            double f1, m1;
+
+            {//for uniform load
+                f1 = -(f0 + w0 * L);
+                m1 = -(m0 + f0 * L + w0 * L * L / 2);
+            }
+
+            var p0 = new Force();
+            var p1 = new Force();
+
+            if (this.Direction == BeamDirection.Y)
+            {
+                p0.Fz = f0;
+                p1.Fz = f1;
+
+                p0.My = m0;//possible negative
+                p1.My = m1;//possible negative
+            }
+            else
+            {
+                p0.Fy = f0;
+                p1.Fy = f1;
+
+                p0.Mz = -m0;//possible negative
+                p1.Mz = -m1;//possible negative
+            }
+            /** /
+            {//scale the output to reduce error
+
+                var pt = (f1+f0) / (w0 * L );
+
+                p0 = 1 / pt * p0 ;
+                p1 = 1 / pt * p1 ;
+            }
+            /**/
+            return new Force[] { -p0, -p1 };
+        }
+
+        #endregion
+
+        [TodoDelete]
+        /// <inheritdoc/>
+        private Force[] GetLocalEquivalentNodalLoads_old(Element targetElement, ElementalLoad load)
         {
             var bar = targetElement as BarElement;
             var n = bar.Nodes.Length;
 
+            var tDeg = 0;
 
-            //https://www.quora.com/How-should-I-perform-element-forces-or-distributed-forces-to-node-forces-translation-in-the-beam-element
+            if (bar.Section != null)
+                tDeg += bar.Section.GetMaxFunctionOrder()[0];
 
-            var tr = targetElement.GetTransformationManager();
+            if (bar.Section != null)
+                tDeg += bar.Material.GetMaxFunctionOrder()[0];
+
+            if (load is UniformLoad uldd )
+            {
+                if (tDeg == 0)
+                    return GetLocalEquivalentNodalLoads_uniformLoad_UniformMatSection(bar, uldd);
+                else
+                    return GetLocalEquivalentNodalLoads_uniformLoad_nonUniformMatSection(bar, uldd);
+            }
+                //https://www.quora.com/How-should-I-perform-element-forces-or-distributed-forces-to-node-forces-translation-in-the-beam-element
+
+                var tr = targetElement.GetTransformationManager();
 
             #region uniform 
 
@@ -616,6 +1389,26 @@ namespace BriefFiniteElementNet.ElementHelpers.BarHelpers
 
                     degree = uld.SeverityFunction.Degree[0];// Coefficients.Length;
                 }
+                //else if (load is PartialLinearLoad)
+                /*
+                {
+                    
+                    var uld = load as PartialLinearLoad;
+
+                    magnitude = xi => uld.GetMagnitudeAt.Evaluate(xi);
+                    localDir = uld.Direction;
+
+                    if (uld.CoordinationSystem == CoordinationSystem.Global)
+                        localDir = tr.TransformGlobalToLocal(localDir);
+
+                    localDir = localDir.GetUnit();
+
+                    xi0 = uld.StartLocation.Xi;
+                    xi1 = uld.EndLocation.Xi;
+
+                    degree = uld.SeverityFunction.Degree[0];// Coefficients.Length;
+                    
+                }*/
                 else
                     throw new NotImplementedException();
 
@@ -826,6 +1619,16 @@ namespace BriefFiniteElementNet.ElementHelpers.BarHelpers
                 return geo.Iy * mech.Ex;
             else
                 return geo.Iz * mech.Ex;
+        }
+
+        public override ILoadHandler[] GetLoadHandlers()
+        {
+            return new ILoadHandler[] {
+
+                new LoadHandlers.EulerBernoulliBeamHelper2Node.Concentrated_UF_Handler(),
+                new LoadHandlers.EulerBernoulliBeamHelper2Node.ImposedStrain_UF_NUF_Handler(),
+                new LoadHandlers.EulerBernoulliBeamHelper2Node.Uniform_UF_Handler(),
+            };
         }
 
 

@@ -3,11 +3,12 @@ using System.Linq;
 using NUnit.Framework;
 using BriefFiniteElementNet;
 using BriefFiniteElementNet.ElementHelpers;
+using BriefFiniteElementNet.ElementHelpers.BarHelpers;
 using BriefFiniteElementNet.Elements;
 using BriefFiniteElementNet.Loads;
 using BriefFiniteElementNet.Materials;
 using BriefFiniteElementNet.Sections;
-
+using EulerBernoulliBeamHelper = BriefFiniteElementNet.ElementHelpers.BarHelpers.EulerBernoulliBeamHelper2Node;
 
 namespace BriefFiniteElementNet.Tests
 {
@@ -28,10 +29,12 @@ namespace BriefFiniteElementNet.Tests
 
             var elm = new BarElement(nodes[0], nodes[1]) { Label = "e0" };
 
+            elm.Material = Materials.UniformIsotropicMaterial.CreateFromYoungPoisson(210e9, 0.25);
+            elm.Section = new Sections.UniformParametric1DSection(0.01, 1e-4, 1e-4);
 
             var u1 = new Loads.UniformLoad(LoadCase.DefaultLoadCase, -Vector.K, w, CoordinationSystem.Global);
 
-            var hlpr = new ElementHelpers.EulerBernoulliBeamHelper(ElementHelpers.BeamDirection.Y, elm);
+            var hlpr = new EulerBernoulliBeamHelper(BeamDirection.Y, elm);
 
             var loads = hlpr.GetLocalEquivalentNodalLoads(elm, u1);
 
@@ -66,11 +69,13 @@ namespace BriefFiniteElementNet.Tests
             nodes[1] = (new Node(4, 0, 0) { Label = "n1" });
 
             var elm = new BarElement(nodes[0], nodes[1]) { Label = "e0" };
+            elm.Material = Materials.UniformIsotropicMaterial.CreateFromYoungPoisson(210e9, 0.25);
+            elm.Section = new Sections.UniformParametric1DSection(0.01, 1e-4, 1e-4);
 
 
             var u1 = new Loads.UniformLoad(LoadCase.DefaultLoadCase, -Vector.J, w, CoordinationSystem.Global);
 
-            var hlpr = new ElementHelpers.EulerBernoulliBeamHelper(ElementHelpers.BeamDirection.Z, elm);
+            var hlpr = new EulerBernoulliBeamHelper(BeamDirection.Z, elm);
 
             var loads = hlpr.GetLocalEquivalentNodalLoads(elm, u1);
 
@@ -104,11 +109,13 @@ namespace BriefFiniteElementNet.Tests
             nodes[1] = (new Node(4, 0, 0) { Label = "n1" });
 
             var elm = new BarElement(nodes[0], nodes[1]) { Label = "e0" };
+            elm.Material = Materials.UniformIsotropicMaterial.CreateFromYoungPoisson(210e9, 0.25);
+            elm.Section = new Sections.UniformParametric1DSection(0.01, 1e-4, 1e-4);
 
 
             var u1 = new Loads.UniformLoad(LoadCase.DefaultLoadCase, -Vector.I, w, CoordinationSystem.Global);
 
-            var hlpr = new ElementHelpers.TrussHelper(elm);
+            var hlpr = new TrussHelper2Node(elm);
 
             var loads = hlpr.GetLocalEquivalentNodalLoads(elm, u1);
 
@@ -141,7 +148,7 @@ namespace BriefFiniteElementNet.Tests
 
             var u1 = new Loads.UniformLoad(LoadCase.DefaultLoadCase, -Vector.K, w, CoordinationSystem.Global);
 
-            var hlpr = new ElementHelpers.EulerBernoulliBeamHelper(ElementHelpers.BeamDirection.Y, elm);
+            var hlpr = new EulerBernoulliBeamHelper(BeamDirection.Y, elm);
 
             var length = (elm.Nodes[1].Location - elm.Nodes[0].Location).Length;
 
@@ -202,7 +209,7 @@ namespace BriefFiniteElementNet.Tests
 
             var u1 = new Loads.UniformLoad(LoadCase.DefaultLoadCase, -Vector.J, w, CoordinationSystem.Global);
 
-            var hlpr = new ElementHelpers.EulerBernoulliBeamHelper(ElementHelpers.BeamDirection.Z, elm);
+            var hlpr = new EulerBernoulliBeamHelper(BeamDirection.Z, elm);
 
             var length = (elm.Nodes[1].Location - elm.Nodes[0].Location).Length;
 
@@ -296,7 +303,7 @@ namespace BriefFiniteElementNet.Tests
 
             var u1 = new Loads.UniformLoad(LoadCase.DefaultLoadCase, -Vector.K, w, CoordinationSystem.Global);
 
-            var hlpr = new ElementHelpers.EulerBernoulliBeamHelper(BeamDirection.Y, elm);
+            var hlpr = new EulerBernoulliBeamHelper(BeamDirection.Y, elm);
 
             var length = (elm.Nodes[1].Location - elm.Nodes[0].Location).Length;
 
@@ -341,10 +348,16 @@ namespace BriefFiniteElementNet.Tests
 
             var elm = new BarElement(nodes[0], nodes[1]) { Label = "e0" };
 
+            var mat = Materials.UniformIsotropicMaterial.CreateFromYoungPoisson(210e9, 0.25);
+            var sec = new Sections.UniformParametric1DSection(0.01);
+
+            elm.Material = mat;
+            elm.Section = sec;
+
 
             var u1 = new Loads.UniformLoad(LoadCase.DefaultLoadCase, Vector.I, w, CoordinationSystem.Global);
 
-            var hlpr = new ElementHelpers.TrussHelper(elm);
+            var hlpr = new TrussHelper2Node(elm);
 
 
             for (var x = 0.0+1e-6; x <= l-1e-6; x += 0.1)

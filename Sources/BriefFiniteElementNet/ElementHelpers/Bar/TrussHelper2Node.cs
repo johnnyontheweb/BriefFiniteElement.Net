@@ -102,7 +102,6 @@ namespace BriefFiniteElementNet.ElementHelpers.BarHelpers
 
         }
 
-
         /// <inheritdoc/>
         public override IEnumerable<Tuple<DoF, double>> GetLocalInternalForceAt(Element targetElement,
             Displacement[] localDisplacements, params double[] isoCoords)
@@ -137,8 +136,138 @@ namespace BriefFiniteElementNet.ElementHelpers.BarHelpers
             return buf;
         }
 
+
+
+
+
+        [TodoDelete]
+        public /*override*/ Force[] GetLocalEquivalentNodalLoads_Old(Element targetElement, ElementalLoad load)
+        {
+            var tr = targetElement.GetTransformationManager();
+
+            #region uniform & trapezoid
+
+            if (load is UniformLoad || load is PartialNonUniformLoad)
+            {
+
+                Func<double, double> magnitude;
+                Vector localDir;
+
+                double xi0, xi1;
+                int degree;//polynomial degree of magnitude function
+
+                #region inits
+                if (load is UniformLoad)
+                {
+                    var uld = load as UniformLoad;
+
+                    magnitude = xi => uld.Magnitude;
+                    localDir = uld.Direction;
+
+                    if (uld.CoordinationSystem == CoordinationSystem.Global)
+                        localDir = tr.TransformGlobalToLocal(localDir);
+
+                    localDir = localDir.GetUnit();
+
+                    xi0 = -1;
+                    xi1 = 1;
+                    degree = 0;
+                }
+                else if (load is PartialNonUniformLoad)
+                {
+                    var uld = load as PartialNonUniformLoad;
+
+                    magnitude = xi => uld.GetMagnitudeAt(targetElement, new IsoPoint(xi));
+                    localDir = uld.Direction;
+
+                    if (uld.CoordinationSystem == CoordinationSystem.Global)
+                        localDir = tr.TransformGlobalToLocal(localDir);
+
+                    localDir = localDir.GetUnit();
+
+                    xi0 = uld.StartLocation.Xi;
+                    xi1 = uld.EndLocation.Xi;
+
+                    degree = uld.SeverityFunction.Degree[0];// Coefficients.Length; 
+                }
+                else
+                    throw new NotImplementedException();
+
+                localDir = localDir.GetUnit();
+                #endregion
+
+                {
+
+                    var nOrd = GetNMaxOrder(targetElement).Max();
+
+                    var gpt = (nOrd + degree) / 2 + 1;//gauss point count
+
+                    var intg = GaussianIntegrator.CreateFor1DProblem(xi =>
+                    {
+                        var shp = GetNMatrixAt(targetElement, xi, 0, 0);
+                        var q__ = magnitude(xi);
+                        var j = GetJMatrixAt(targetElement, xi, 0, 0);
+                        shp.Scale(j.Determinant());
+
+                        var q_ = localDir * q__;
+
+                        shp.Scale(q_.X);
+
+                        return shp;
+                    }, xi0, xi1, gpt);
+
+                    var res = intg.Integrate();
+
+                    var localForces = new Force[2];
+
+                    var fx0 = res[0, 0];
+                    var fx1 = res[0, 1];
+
+                    localForces[0] = new Force(fx0, 0, 0, 0, 0, 0);
+                    localForces[1] = new Force(fx1, 0, 0, 0, 0, 0);
+
+                    return localForces;
+                }
+            }
+
+
+
+            #endregion
+
+            if (load is ConcentratedLoad)
+            {
+                var cns = load as ConcentratedLoad;
+
+                var shapes = GetNMatrixAt(targetElement, cns.ForceIsoLocation.Xi);
+
+                var localForce = cns.Force;
+
+                if (cns.CoordinationSystem == CoordinationSystem.Global)
+                    localForce = tr.TransformGlobalToLocal(localForce);
+
+                shapes.Scale(localForce.Fx);
+
+                var fxs = shapes.Row(0);
+
+                var n = targetElement.Nodes.Length;
+
+                var buf = new Force[n];
+
+                for (var i = 0; i < n; i++)
+                    buf[i] = new Force(fxs[i], 0, 0, 0, 0, 0);
+
+                return buf;
+            }
+
+            throw new NotImplementedException();
+
+        }
+
+
+
+        [TodoDelete]
         /// <inheritdoc/>
-        public override IEnumerable<Tuple<DoF, double>> GetLoadInternalForceAt(Element targetElement, ElementalLoad load,
+        public /*override*/ IEnumerable<Tuple<DoF, double>> GetLoadInternalForceAt_old(Element targetElement, ElementalLoad load,
             double[] isoLocation)
         {
             var buff = new List<Tuple<DoF, double>>();
@@ -358,9 +487,190 @@ namespace BriefFiniteElementNet.ElementHelpers.BarHelpers
             throw new NotImplementedException();
         }
 
-        public override Displacement GetLoadDisplacementAt(Element targetElement, ElementalLoad load, double[] isoLocation)
+
+
+        [TodoDelete]
+        public /*override*/ Displacement GetLoadDisplacementAt_old(Element targetElement, ElementalLoad load, double[] isoLocation)
         {
+            var bar = targetElement as BarElement;
+
+            var n = targetElement.Nodes.Length;
+
+            if (n != 2)
+                throw new Exception("more than two nodes not supported");
+
+
+            var eIorder = bar.Section.GetMaxFunctionOrder()[0] + bar.Material.GetMaxFunctionOrder()[0];
+
+            if (eIorder == 0 && bar.StartReleaseCondition == Constraints.Fixed && bar.EndReleaseCondition == Constraints.Fixed)//constant/uniform section along the length of beam
+            {
+                //EI is constant through the length of beam
+                //end releases are fixed
+
+                if (load is UniformLoad ul)
+                    return GetLoadDisplacementAt_UniformLoad_uniformSection(bar, ul, isoLocation[0]);
+
+                if (load is ConcentratedLoad cl)
+                    return GetLoadDisplacementAt_ConcentratedLoad_uniformSection(bar, cl, isoLocation[0]);
+
+                //if (load is PartialNonUniformLoad pnl)
+                //    return GetLoadDisplacementAt_PartialNonUniformLoad_uniformSection(bar, pnl, isoLocation[0]);
+            }
+
             throw new NotImplementedException();
+        }
+
+        [TodoDelete]
+        //copied to LoadHandler
+        private Displacement GetLoadDisplacementAt_UniformLoad_uniformSection(BarElement bar, UniformLoad load, double xi)
+        {
+            //https://byjusexamprep.com/gate-ce/fixed-beams
+            double w0;
+            double L;
+            double f0, m0;
+
+            if (bar.NodeCount != 2)
+                throw new Exception();
+
+            {//step 0
+                L = (bar.Nodes[1].Location - bar.Nodes[0].Location).Length;
+            }
+
+            #region step 1
+            {
+                var p0 = GetLocalEquivalentNodalLoads(bar, load)[0];
+
+                p0 = -p0;
+
+                var localDir = load.Direction;
+
+                var tr = bar.GetTransformationManager();
+
+                if (load.CoordinationSystem == CoordinationSystem.Global)
+                    localDir = tr.TransformGlobalToLocal(localDir);
+
+                localDir = localDir.GetUnit();
+
+                w0 = localDir.X * load.Magnitude;
+            }
+            #endregion
+
+            {
+                var eiOrder = bar.Section.GetMaxFunctionOrder()[0] + bar.Material.GetMaxFunctionOrder()[0];
+
+                if (eiOrder != 0) throw new BriefFiniteElementNetException("Nonuniform EI");
+            }
+
+
+
+
+            {
+                var sec = bar.Section.GetCrossSectionPropertiesAt(xi, bar);
+                var mat = bar.Material.GetMaterialPropertiesAt(new IsoPoint(xi), bar);
+
+                var e = mat.Ex;
+                var A = sec.A;
+                var x = bar.IsoCoordsToLocalCoords(xi)[0];
+
+                
+                var d = w0 * x / (2 * e * A) * (L - x);
+
+                var buf = new Displacement();
+
+                buf.DX = d;
+
+                return buf;
+            }
+        }
+
+        [TodoDelete]
+        //copied to load handler
+        public Force[] GetLocalEquivalentNodalLoads_imposedStrainLoad_UniformMatSection(BarElement bar, ImposedStrainLoad load)
+        {
+            var E = bar.Material.GetMaterialPropertiesAt(0).Ex;
+            var A = bar.Material.GetMaterialPropertiesAt(0).Ex;
+            var L = bar.GetLength();
+            var strain = load.ImposedStrainMagnitude;
+
+            //F = K . D, K = E.A/L, strain = D/L, F=strain*E*A
+
+            var f = strain * E * A;
+
+
+            throw new NotImplementedException();
+            
+        }
+
+        [TodoDelete]
+        private Displacement GetLoadDisplacementAt_ConcentratedLoad_uniformSection(BarElement bar, ConcentratedLoad load, double xi)
+        {
+            
+            double L;
+            double ft;//force concentrated
+            double f0;//inverse of eq nodal loads
+            double xt;//applied location
+
+            if (bar.NodeCount != 2)
+                throw new Exception();
+
+            {//step 0
+                L = (bar.Nodes[1].Location - bar.Nodes[0].Location).Length;
+
+                xt = bar.IsoCoordsToLocalCoords(load.ForceIsoLocation.Xi)[0];
+            }
+
+            #region step 1
+
+            {
+                var p0 = GetLocalEquivalentNodalLoads(bar, load)[0];
+
+                p0 = -p0;
+
+                f0 = p0.Fx;
+            }
+
+            {
+                var localForce = load.Force;
+
+                var tr = bar.GetTransformationManager();
+
+                if (load.CoordinationSystem == CoordinationSystem.Global)
+                    localForce = tr.TransformGlobalToLocal(localForce);
+
+                ft = localForce.Fx;
+            }
+
+            #endregion
+
+            {
+                var eiOrder = bar.Section.GetMaxFunctionOrder()[0] + bar.Material.GetMaxFunctionOrder()[0];
+
+                if (eiOrder != 0) throw new BriefFiniteElementNetException("Nonuniform EI");
+            }
+
+            {
+                var sec = bar.Section.GetCrossSectionPropertiesAt(xi, bar);
+                var mat = bar.Material.GetMaterialPropertiesAt(new IsoPoint(xi), bar);
+
+                var e = mat.Ex;
+
+                var a = sec.A;
+
+                var x = bar.IsoCoordsToLocalCoords(xi)[0];
+
+                var d = 0.0;
+
+                if (x <= xt)
+                    d = -f0 * x / (e * a);
+                else
+                    d = -f0 * xt / (e * a) + (f0 + ft) * (x - xt) / (e * a);
+
+                var buf = new Displacement();
+
+                buf.DX = d;
+
+                return buf;
+            }
         }
 
         /// <inheritdoc/>
@@ -376,145 +686,25 @@ namespace BriefFiniteElementNet.ElementHelpers.BarHelpers
             return new Displacement(CalcUtil.DotProduct(n, u), 0, 0, 0, 0, 0);
         }
 
-        public override Force[] GetLocalEquivalentNodalLoads(Element targetElement, ElementalLoad load)
-        {
-            var tr = targetElement.GetTransformationManager();
-
-            #region uniform & trapezoid
-
-            if (load is UniformLoad || load is PartialNonUniformLoad)
-            {
-
-                Func<double, double> magnitude;
-                Vector localDir;
-
-                double xi0, xi1;
-                int degree;//polynomial degree of magnitude function
-
-                #region inits
-                if (load is UniformLoad)
-                {
-                    var uld = load as UniformLoad;
-
-                    magnitude = xi => uld.Magnitude;
-                    localDir = uld.Direction;
-
-                    if (uld.CoordinationSystem == CoordinationSystem.Global)
-                        localDir = tr.TransformGlobalToLocal(localDir);
-
-                    localDir = localDir.GetUnit();
-
-                    xi0 = -1;
-                    xi1 = 1;
-                    degree = 0;
-                }
-                else if (load is PartialNonUniformLoad)
-                {
-                    var uld = load as PartialNonUniformLoad;
-
-                    magnitude = xi => uld.GetMagnitudeAt(targetElement, new IsoPoint(xi));
-                    localDir = uld.Direction;
-
-                    if (uld.CoordinationSystem == CoordinationSystem.Global)
-                        localDir = tr.TransformGlobalToLocal(localDir);
-
-                    localDir = localDir.GetUnit();
-
-                    xi0 = uld.StartLocation.Xi;
-                    xi1 = uld.EndLocation.Xi;
-
-                    degree = uld.SeverityFunction.Degree[0];// Coefficients.Length; 
-                }
-                else
-                    throw new NotImplementedException();
-
-                localDir = localDir.GetUnit();
-                #endregion
-
-                {
-
-                    var nOrd = GetNMaxOrder(targetElement).Max();
-
-                    var gpt = (nOrd + degree) / 2 + 1;//gauss point count
-
-                    var intg = GaussianIntegrator.CreateFor1DProblem(xi =>
-                    {
-                        var shp = GetNMatrixAt(targetElement, xi, 0, 0);
-                        var q__ = magnitude(xi);
-                        var j = GetJMatrixAt(targetElement, xi, 0, 0);
-                        shp.Scale(j.Determinant());
-
-                        var q_ = localDir * q__;
-
-                        shp.Scale(q_.X);
-
-                        return shp;
-                    }, xi0, xi1, gpt);
-
-                    var res = intg.Integrate();
-
-                    var localForces = new Force[2];
-
-                    var fx0 = res[0, 0];
-                    var fx1 = res[0, 1];
-
-                    localForces[0] = new Force(fx0, 0, 0, 0, 0, 0);
-                    localForces[1] = new Force(fx1, 0, 0, 0, 0, 0);
-
-                    return localForces;
-                }
-            }
-
-
-
-            #endregion
-
-            if (load is ConcentratedLoad)
-            {
-                var cns = load as ConcentratedLoad;
-
-                var shapes = GetNMatrixAt(targetElement, cns.ForceIsoLocation.Xi);
-
-                var localForce = cns.Force;
-
-                if (cns.CoordinationSystem == CoordinationSystem.Global)
-                    localForce = tr.TransformGlobalToLocal(localForce);
-
-
-                shapes.Scale(localForce.Fx);
-
-                var fxs = shapes.Row(0);
-
-                var n = targetElement.Nodes.Length;
-
-                var buf = new Force[n];
-
-                for (var i = 0; i < n; i++)
-                    buf[i] = new Force(fxs[i], 0, 0, 0, 0, 0);
-
-                return buf;
-            }
-
-            throw new NotImplementedException();
-
-
-        }
 
         public void AddStiffnessComponents(CoordinateStorage<double> global)
         {
             throw new NotImplementedException();
         }
 
+        [TodoDelete]
         public GeneralStressTensor GetLocalStressAt(Element targetElement, Displacement[] localDisplacements, params double[] isoCoords)
         {
             throw new NotImplementedException();
         }
 
+        [TodoDelete]
         public override GeneralStressTensor GetLoadStressAt(Element targetElement, ElementalLoad load, double[] isoLocation)
         {
             throw new NotImplementedException();
         }
 
+        [TodoDelete]
         public override GeneralStressTensor GetLocalInternalStressAt(Element targetElement, Displacement[] localDisplacements, params double[] isoCoords)
         {
             throw new NotImplementedException();
@@ -558,6 +748,17 @@ namespace BriefFiniteElementNet.ElementHelpers.BarHelpers
             var mech = targetElement.Material.GetMaterialPropertiesAt(xi);
 
             return mech.Ex * geo.A;
+        }
+
+        public override ILoadHandler[] GetLoadHandlers()
+        {
+            return new ILoadHandler[] {
+
+                new LoadHandlers.Truss2Node.Concentrated_UF_Handler(),
+                new LoadHandlers.Truss2Node.ImposedStrain_UF_Handler(),
+                new LoadHandlers.Truss2Node.PartialNonuniform_UF_Handler(),
+                new LoadHandlers.Truss2Node.Uniform_UF_Handler(),
+            };
         }
     }
 }

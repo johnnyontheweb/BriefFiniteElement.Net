@@ -10,6 +10,7 @@ using BriefFiniteElementNet.Sections;
 using System.Security.Permissions;
 using System.Globalization;
 using BriefFiniteElementNet.ElementHelpers.BarHelpers;
+using BriefFiniteElementNet.ElementHelpers.Bar;
 
 namespace BriefFiniteElementNet.Elements
 {
@@ -200,6 +201,8 @@ namespace BriefFiniteElementNet.Elements
             get { return _nodalReleaseConditions; }
             set { _nodalReleaseConditions = value; }
         }
+
+        
         #endregion
 
 
@@ -537,11 +540,22 @@ namespace BriefFiniteElementNet.Elements
         /// <inheritdoc/>
         public override double[] IsoCoordsToLocalCoords(params double[] isoCoords)
         {
+            if (NodeCount == 2)
+                return new double[] { IsoCoordsToLocalCoords_2Node(isoCoords[0]) };//faster version than below
+
             var pl = GetIsoToLocalConverter().Evaluate(isoCoords[0]);
 
             return new double[] { pl };
         }
 
+        private double IsoCoordsToLocalCoords_2Node(double xi)
+        {
+            var L = this.GetLength();
+
+            var x = (xi + 1) * L / 2;
+
+            return x;
+        }
 
 
         /// <summary>
@@ -566,6 +580,10 @@ namespace BriefFiniteElementNet.Elements
 
         public double[] LocalCoordsToIsoCoords(params double[] localCoords)
         {
+            if (NodeCount == 2)
+                return new double[] { LocalCoordsToIsoCoords_2Node(localCoords[0]) };//faster version
+
+
             var pl = GetIsoToLocalConverter();
             var x = localCoords[0];
 
@@ -578,6 +596,16 @@ namespace BriefFiniteElementNet.Elements
 
             return new double[] { rt };
         }
+
+        private double LocalCoordsToIsoCoords_2Node(double x)
+        {
+            var L = this.GetLength();
+
+            var xi = (2 * x / L) - 1;
+
+            return xi;
+        }
+
 
         /// <summary>
         /// Gets the stifness matrix in local coordination system.
@@ -899,7 +927,7 @@ namespace BriefFiniteElementNet.Elements
 
                 var discretePoints = new List<IsoPoint>();
 
-                discretePoints.AddRange(this.GetInternalForceDiscretationPoints());
+                discretePoints.AddRange(this.GetInternalForceDiscretationPoints(loadCase));
 
 
                 foreach (var load in Loads)
@@ -919,11 +947,13 @@ namespace BriefFiniteElementNet.Elements
                 GetInternalForceAt(xi, loadCase);
             //Force.Zero;
 
-            var fcs = new Dictionary<DoF, double>();
+            //var fcs = new Dictionary<DoF, double>();
 
             //var buf = new FlatShellStressTensor();
 
             var helpers = GetHelpers();
+
+            var vec = new double[6];
 
             foreach (var load in this.Loads)
                 if (load.Case == loadCase)
@@ -933,17 +963,18 @@ namespace BriefFiniteElementNet.Elements
 
                         foreach (var fc in tns)
                         {
-                            double existing;
+                            vec[(int)fc.Item1] += fc.Item2;
 
-                            fcs.TryGetValue(fc.Item1, out existing);
-
-                            fcs[fc.Item1] = existing + fc.Item2;
+                            //double existing;
+                            //fcs.TryGetValue(fc.Item1, out existing);
+                            //fcs[fc.Item1] = existing + fc.Item2;
                         }
                     }
 
             var buff = new Force();
             buff += approx;//TODO: maybe += approx !
-
+            buff += Force.FromVector(vec, 0);
+            /*
             if (fcs.ContainsKey(DoF.Dx))
                 buff.Fx += fcs[DoF.Dx];
 
@@ -961,7 +992,7 @@ namespace BriefFiniteElementNet.Elements
 
             if (fcs.ContainsKey(DoF.Rz))
                 buff.Mz += fcs[DoF.Rz];
-
+            */
             return buff;
         }
 
@@ -993,14 +1024,19 @@ namespace BriefFiniteElementNet.Elements
             return GetExactInternalForceAt(xi, LoadCase.DefaultLoadCase);
         }
 
-        
-       
+
+
 
         #endregion
 
         #region GetInternalDisplacementAt, GetExactInternalDisplacementAt
 
-        
+
+        public Displacement GetInternalDisplacementAt(double xi)
+        {
+            return GetInternalDisplacementAt(xi, LoadCase.DefaultLoadCase);
+        }
+
         public Displacement GetInternalDisplacementAt(double xi, LoadCombination combination)
         {
             var buf = new Displacement();
@@ -1011,13 +1047,6 @@ namespace BriefFiniteElementNet.Elements
             return buf;
         }
 
-        
-        public Displacement GetExactInternalDisplacementAt(double xi, LoadCombination combination)
-        {
-            throw new NotImplementedException();
-        }
-
-        
         public Displacement GetInternalDisplacementAt(double xi, LoadCase loadCase)
         {
             var buf = Displacement.Zero;
@@ -1042,24 +1071,64 @@ namespace BriefFiniteElementNet.Elements
             return buf;
         }
 
-        
+
+        public Displacement GetExactInternalDisplacementAt(double xi, LoadCombination combination)
+        {
+            var buf = Displacement.Zero;
+
+            foreach (var lc in combination.Keys)
+                buf += combination[lc] * this.GetExactInternalDisplacementAt(xi, lc);
+
+            return buf;
+        }
+
         public Displacement GetExactInternalDisplacementAt(double xi, LoadCase loadCase)
         {
-            throw new NotImplementedException();
+            {
+                //check to see if xi is exactly on any discrete points, for example shear exactly under a a concentrated force point is not a single value so exception must thrown
+
+                var discretePoints = new List<IsoPoint>();
+
+                discretePoints.AddRange(this.GetInternalForceDiscretationPoints(loadCase));
+
+
+                foreach (var load in Loads)
+                {
+                    if (load.Case == loadCase)
+                        discretePoints.AddRange(load.GetInternalForceDiscretationPoints());
+                }
+
+                foreach (var point in discretePoints)
+                {
+                    if (xi == point.Xi)
+                        throw new InvalidInternalForceLocationException(string.Format(CultureInfo.CurrentCulture, "Internal force diagram and value is descrete at xi = {0}, thus have no value in this location. try to find internal force a little bit after or before this point", xi));
+                }
+            }
+
+            var approx = GetInternalDisplacementAt(xi, loadCase);
+            
+            var helpers = GetHelpers();
+
+            var buf = approx;
+
+
+            foreach (var load in this.Loads)
+                if (load.Case == loadCase)
+                    foreach (var helper in helpers)
+                    {
+                        var d = helper.GetLoadDisplacementAt(this, load, new[] { xi });
+                        buf += d;
+                    }
+
+            return buf;
         }
 
-        
-        public Displacement GetInternalDisplacementAt(double xi)
-        {
-            return GetInternalDisplacementAt(xi, LoadCase.DefaultLoadCase);
-        }
-
-        
         public Displacement GetExactInternalDisplacementAt(double xi)
         {
-            throw new NotImplementedException();
+            return GetExactInternalDisplacementAt(xi, LoadCase.DefaultLoadCase);
         }
         #endregion
+
 
         /// <summary>
         /// get the polynomial that takes iso coord as input and return local coord as output
@@ -1188,14 +1257,22 @@ namespace BriefFiniteElementNet.Elements
             return true;
         }
 
+
+
+        [Obsolete("use GetInternalForceDiscretationPoints(params LoadCase[] loadCases) instead")]
         /// <summary>
-        /// Gets the iso location of points that internal force in those points are discrete only due to element.
+        /// Gets the iso location of points that internal force in those points are discrete only due to node locations.
         /// </summary>
+        /// <remarks>
+        /// These points always contain start and end node, plus any node in between (in case of 3 node beam)
+        /// </remarks>
         /// <returns>list of iso locations</returns>
         public IsoPoint[] GetInternalForceDiscretationPoints()
         {
+            throw new Exception();
             var buf = new List<IsoPoint>();
 
+            /*
             foreach (var node in nodes)
             {
                 var x = (node.Location - nodes[0].Location).Length;
@@ -1204,22 +1281,9 @@ namespace BriefFiniteElementNet.Elements
 
                 buf.Add(new IsoPoint(xi));
             }
-
-            //Note: internal loads are not accounted
-            /*
-            foreach (var load in this.loads)
-            {
-                if (load.Case != loadCase)
-                    continue;
-
-                var pts = load.GetInternalForceDiscretationPoints();
-
-                buf.AddRange(pts);
-            }
-            */
+           
             var b2 = new List<IsoPoint>();
 
-           
             foreach (var point in buf.OrderBy(i=>i.Xi))
             {
                 var pt = new IsoPoint(point.Xi);
@@ -1229,13 +1293,21 @@ namespace BriefFiniteElementNet.Elements
             }
 
             return b2.ToArray();
+
+            */
         }
 
         /// <summary>
-        /// Gets the iso location of points that internal force in those points are discrete only due to element.
+        /// Gets the iso location of points that internal force in those points are discrete due to element.
         /// </summary>
         /// <returns>list of iso locations</returns>
-        public IsoPoint[] GetInternalForceDiscretationPoints(LoadCase loadCase)
+        /// <remarks>
+        /// returned iso points are generally grouped into two groups:
+        /// 1- those which are Nodes iso locations. in case of two node, ksi=-1 and ksi=+1 are in this group
+        /// 2- those which are locations that concentrated loads are applied.
+        /// this method return all of them grouped into an array
+        /// </remarks>
+        public IsoPoint[] GetInternalForceDiscretationPoints(params LoadCase[] loadCases)
         {
             var buf = new List<IsoPoint>();
 
@@ -1248,16 +1320,19 @@ namespace BriefFiniteElementNet.Elements
                 buf.Add(new IsoPoint(xi));
             }
 
-            //Note: internal loads are not accounted
-            foreach (var load in this.loads)
+            foreach (var loadCase in loadCases)
             {
-                if (load.Case != loadCase)
-                    continue;
+                foreach (var load in this.loads)
+                {
+                    if (load.Case != loadCase)
+                        continue;
 
-                var pts = load.GetInternalForceDiscretationPoints();
+                    var pts = load.GetInternalForceDiscretationPoints();
 
-                buf.AddRange(pts);
+                    buf.AddRange(pts);
+                }
             }
+            
             var b2 = new List<IsoPoint>();
 
 

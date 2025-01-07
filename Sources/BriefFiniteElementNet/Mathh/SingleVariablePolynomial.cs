@@ -6,7 +6,11 @@ using System.Globalization;
 
 namespace BriefFiniteElementNet.Mathh
 {
+    /// <summary>
+    /// Represents a single variable polynomial (y=a_n*x^n+...+a_0*x^0)
+    /// </summary>
     [Serializable]
+    [Obsolete("use Polynomial1D if possible")]
     public class SingleVariablePolynomial : IPolynomial
     {
         public static SingleVariablePolynomial FromPoints(double x1, double y1)
@@ -39,6 +43,36 @@ namespace BriefFiniteElementNet.Mathh
                 }
 
                 b[i, 0] = points[i].Item2;
+            }
+
+            var coefs = mtx.Solve(b.Values);
+
+            return new SingleVariablePolynomial(coefs);
+        }
+
+        public static SingleVariablePolynomial FromPoints(double[] xs, double[] ys)
+        {
+            if (xs.Length != ys.Length)
+                throw new Exception();
+
+            var n = xs.Length;
+
+            var mtx = new Matrix(n, n);
+
+            var b = new Matrix(n, 1);
+
+
+            for (var i = 0; i < n; i++)
+            {
+                for (var j = 0; j < n; j++)
+                {
+                    var xi = xs[i];
+                    var pow = n - j - 1;
+
+                    mtx[i, j] = pow == 0 ? 1.0 : Math.Pow(xi, pow);
+                }
+
+                b[i, 0] = ys[i];
             }
 
             var coefs = mtx.Solve(b.Values);
@@ -195,6 +229,44 @@ namespace BriefFiniteElementNet.Mathh
             return max;
         }
 
+
+        /// <summary>
+        /// Evaluates the <see cref="n"/>'th integral of this polynomial at defined <see cref="x"/>. assumes the C's of integrals are all zeros.
+        /// </summary>
+        /// <param name="n">the degree</param>
+        /// <param name="x">target point</param>
+        /// <returns></returns>
+        public double EvaluateNthIntegralAt(int n, double x)
+        {
+            //n'th integral of a*x^i is : a * x^(i+n)/((i+1)...(i+n)) : coef * x^(i+n)
+
+            if (n == 0)
+                return Evaluate_internal(x);
+
+            var buf = 0.0;
+
+            for (var j = 0; j < Coefficients.Length; j++)
+            {
+                var i = Coefficients.Length - 1 - j;
+                var a = Coefficients[i];
+
+                double coef;
+
+                {
+                    var f1 = Factorial(i + n);// (i+n)!
+                    var f2 = Factorial(i);// (i+1)!
+
+                    var t = f1 / f2;
+                    coef = a /t;
+                }
+
+                buf += coef * MyPow(x, i + n);
+            }
+
+            return buf;
+        }
+
+
         /// <summary>
         /// Gets the derivative of polynomial as another polynomial
         /// </summary>
@@ -226,11 +298,77 @@ namespace BriefFiniteElementNet.Mathh
                 {
                     var newPow = n - m;
 
-                    //dic[newPow] = Factorial(n)/Factorial(n - m) * this.Coefficients[i];
                     dic[newPow] = Factorial(n, n - m) * this.Coefficients[i];
+                }
+            }
+
+            for (var i = 0; i < buf.Length; i++)
+            {
+                var origPow = buf.Length - 1 - i;
+
+                buf[i] = dic[origPow];
+            }
+
+            var pBuf = new SingleVariablePolynomial(buf);
+            return pBuf;
+            /**/
+        }
+
+
+        public SingleVariablePolynomial GetIntegral(int deg)
+        {
+            if (deg == 0)
+                return (SingleVariablePolynomial)this.MemberwiseClone();
+
+            if (Coefficients.Length == 0)
+                return this.Clone();
+
+            var buf = new double[Coefficients.Length + deg];
+
+            this.Coefficients.CopyTo(buf, 0);
+
+            var n = Coefficients.Length;
+
+            for (int i = 0; i < n; i++)
+            {
+                var pow = n - i - 1;
+                Coefficients[i] = this.Coefficients[i] / Factorial(i + deg, deg);
+            }
+
+            return new SingleVariablePolynomial(buf);
+            /*
+
+            var dic = new Dictionary<int, double>();
+
+
+            for (var i = 0; i < Coefficients.Length; i++)
+            {
+                var cf = this.Coefficients[i];
+
+                if (cf == 0)
+                    continue;
+
+                var origPow = Coefficients.Length - 1 - i;
+
+                var n = origPow;
+                var m = deg;
+
+                {
+                    var newPow = n + m;
+
+                    //dic[newPow] = Factorial(n)/Factorial(n - m) * this.Coefficients[i];
+                    dic[newPow] = Factorial(n + m, n) * this.Coefficients[i];
 
                     //var d = Factorial(n) / Factorial(n - m) - Factorial(n, n - m);
                 }
+            }
+
+            foreach (var k in dic.Keys)
+            {
+                var cf = k;
+                var v = dic[k];
+
+                buf[i] = dic[origPow];
             }
 
             for (var i = 0; i < buf.Length; i++)
@@ -271,7 +409,7 @@ namespace BriefFiniteElementNet.Mathh
                     var cff = Factorial(nn, nm);
 
                     var cf2 = Coefficients[i];
-                    var vari = Power(x, nm);
+                    var vari = CalcUtil.Power(x, nm);
                     retVal += vari * cff * cf2;
                 }
             }
@@ -281,28 +419,6 @@ namespace BriefFiniteElementNet.Mathh
 
 
 
-        /// <summary>
-        /// computes Math.Pow(num,exp) in much faster way
-        /// </summary>
-        /// <param name="num"></param>
-        /// <param name="exp"></param>
-        /// <returns></returns>
-        /// <remarks>
-        /// based on this implementation: https://stackoverflow.com/a/101613/1106889
-        /// </remarks>
-        static double Power(double num, int exp)
-        {
-            double result = 1.0;
-            while (exp > 0)
-            {
-                if (exp % 2 == 1)
-                    result *= num;
-                exp >>= 1;
-                num *= num;
-            }
-
-            return result;
-        }
 
         /*
         /// <summary>
@@ -499,6 +615,7 @@ namespace BriefFiniteElementNet.Mathh
 
         public double[] EvaluateNthDerivative(int n, params double[] x)
         {
+            
             throw new NotImplementedException();
         }
 
@@ -514,5 +631,8 @@ namespace BriefFiniteElementNet.Mathh
                 Coefficients[i] *= constant;
             }
         }
+
+
+      
     }
 }
